@@ -449,7 +449,7 @@ void MainWindow::initTableModel()
 
     ui->tv_Edit->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     ui->tv_Edit->setColumnWidth(1, 100);
-    ui->tv_Edit->setColumnWidth(2, 90);
+    ui->tv_Edit->setColumnWidth(2, 300);
     ui->tv_Edit->setColumnWidth(3, 120);
     ui->tv_Edit->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
 
