@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>CMA 가계부 매니저</string>
+   <string>CMA 대시보드</string>
   </property>
   <widget class="QWidget" name="centralwidget">
    <layout class="QVBoxLayout" name="verticalLayout">
@@ -646,25 +646,55 @@
            </font>
           </property>
           <property name="text">
-           <string>대시보드 준비 중...</string>
+           <string>총 누적 금액: 0 원</string>
           </property>
           <property name="alignment">
-           <set>Qt::AlignmentFlag::AlignCenter</set>
+           <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
           </property>
          </widget>
         </item>
         <item>
-         <spacer name="verticalSpacer_8">
-          <property name="orientation">
-           <enum>Qt::Orientation::Vertical</enum>
+         <widget class="QTabWidget" name="tabWidget_Dashboard">
+          <property name="currentIndex">
+           <number>0</number>
           </property>
-          <property name="sizeHint" stdset="0">
-           <size>
-            <width>20</width>
-            <height>40</height>
-           </size>
-          </property>
-         </spacer>
+          <widget class="QWidget" name="tab_Summary">
+           <attribute name="title">
+            <string>상세 내역</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_7">
+            <item>
+             <widget class="QTableWidget" name="tw_DashboardSummary">
+              <property name="editTriggers">
+               <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
+              </property>
+              <property name="alternatingRowColors">
+               <bool>true</bool>
+              </property>
+              <property name="selectionMode">
+               <enum>QAbstractItemView::SelectionMode::NoSelection</enum>
+              </property>
+              <column>
+               <property name="text">
+                <string>카테고리</string>
+               </property>
+              </column>
+              <column>
+               <property name="text">
+                <string>총 금액</string>
+               </property>
+              </column>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_Chart">
+           <attribute name="title">
+            <string>파이 차트</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_8"/>
+          </widget>
+         </widget>
         </item>
        </layout>
       </widget>
