@@ -10,6 +10,13 @@
 #include <QtCharts/QChart>
 #include <QScreen>
 #include <QGuiApplication>
+#include <QMenu>
+#include <QAction>
+#include <QDialog>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QHeaderView>
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -43,6 +50,9 @@ private:
     void initDashboard();
     void updateDashboardMonthList();
     void updateDashboard();
+
+    void initMenuBar();
+    void openCategoryManager();
 };
 
 #endif // MAINWINDOW_H

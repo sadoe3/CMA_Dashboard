@@ -3,58 +3,24 @@
 
 #include <QRegularExpressionValidator>
 #include <QLocale>
-#include <QStyledItemDelegate>
 #include <QComboBox>
 #include <QtCharts/QPieSlice>
 #include <QScreen>
 #include <QGuiApplication>
-
-// ==========================================================================
-// CategoryDelegate 클래스
-// --------------------------------------------------------------------------
-// 데이터 그리드(QTableView)에서 카테고리 셀을 편집할 때 일반 텍스트 입력창 대신
-// DB에 등록된 카테고리 목록을 콤보박스로 띄워줍니다.
-// 사용자의 오타나 규격 외 데이터 입력을 차단하여 무결성을 유지하는 역할을 합니다.
-// ==========================================================================
-class CategoryDelegate : public QStyledItemDelegate {
-public:
-    CategoryDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
-
-    QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &/*option*/, const QModelIndex &/*index*/) const override {
-        QComboBox *editor = new QComboBox(parent);
-        QSqlQuery query("SELECT name FROM Category ORDER BY id ASC");
-        while (query.next()) {
-            editor->addItem(query.value(0).toString());
-        }
-        return editor;
-    }
-
-    void setEditorData(QWidget *editor, const QModelIndex &index) const override {
-        QString value = index.model()->data(index, Qt::EditRole).toString();
-        QComboBox *cb = static_cast<QComboBox*>(editor);
-        int cbIndex = cb->findText(value);
-        if (cbIndex >= 0) {
-            cb->setCurrentIndex(cbIndex);
-        }
-    }
-
-    void setModelData(QWidget *editor, QAbstractItemModel *model, const QModelIndex &index) const override {
-        QComboBox *cb = static_cast<QComboBox*>(editor);
-        model->setData(index, cb->currentText(), Qt::EditRole);
-    }
-};
+#include <QSqlRelationalTableModel>
+#include <QSqlRelationalDelegate>
+#include <QSqlRelation>
 
 // ==========================================================================
 // CustomSqlTableModel 클래스
 // --------------------------------------------------------------------------
-// 기본 QSqlTableModel을 상속받아 화면 렌더링 시점에만 데이터의 표현 방식을 바꿉니다.
-// 수정된 데이터에 연노랑색 배경을 칠해주고, 금액 데이터(3번 컬럼)에 천 단위 콤마를 찍어
-// 사용자의 가독성과 편집 상태 인지를 돕는 시각화 전용 모델입니다.
+// QSqlRelationalTableModel을 상속받아 외래키(Foreign Key) 자동 매핑을 지원하며,
+// 미저장 데이터의 시각적 하이라이팅 및 금액 데이터의 동적 통화 포맷팅을 처리합니다.
 // ==========================================================================
-class CustomSqlTableModel : public QSqlTableModel {
+class CustomSqlTableModel : public QSqlRelationalTableModel {
 public:
     CustomSqlTableModel(QObject *parent = nullptr, QSqlDatabase db = QSqlDatabase())
-        : QSqlTableModel(parent, db) {}
+        : QSqlRelationalTableModel(parent, db) {}
 
     QVariant data(const QModelIndex &idx, int role = Qt::DisplayRole) const override {
         // 미저장 변경 데이터 하이라이팅
@@ -69,14 +35,14 @@ public:
                 return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
             }
             if (role == Qt::DisplayRole) {
-                QVariant originalValue = QSqlTableModel::data(idx, role);
+                QVariant originalValue = QSqlRelationalTableModel::data(idx, role);
                 bool ok;
                 qlonglong number = originalValue.toLongLong(&ok);
                 if (ok) return QLocale().toString(number);
             }
         }
 
-        return QSqlTableModel::data(idx, role);
+        return QSqlRelationalTableModel::data(idx, role);
     }
 };
 
@@ -91,19 +57,20 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
-    // 창 크기를 1200x950으로 강제 할당 및 고정하여 레이아웃이 깨지지 않도록 방어
-    this->resize(1200, 950);
-    this->setMinimumSize(1200, 950);
+    // 창 크기를 강제 할당 및 고정하여 레이아웃이 깨지지 않도록 방어
+    this->resize(1200, 990);
+    this->setMinimumSize(1200, 990);
 
     // QScreen을 통해 모니터 크기를 읽어와 창을 가로 중앙, 세로 상단(0.5% 여백)에 띄움
     QScreen *screen = QGuiApplication::primaryScreen();
     QRect screenGeometry = screen->availableGeometry();
     int x = (screenGeometry.width() - this->width()) / 2;
-    int y = screenGeometry.height() * 0.005;
+    int y = 3;
     this->move(x, y);
 
     initDatabase();
     initCategoryTable();
+    initMenuBar();
     initEventHandlers();
     initCurrencyComponent();
     loadCategories();
@@ -128,8 +95,8 @@ MainWindow::~MainWindow()
 // ==========================================================================
 // DB 및 테이블 구성 로직
 // --------------------------------------------------------------------------
-// SQLite를 연결하고 CMA_Records(가계부 본체)와 Category(카테고리 목록) 테이블이
-// 존재하지 않으면 신규 생성합니다. 카테고리가 비어있으면 5개의 기본값을 삽입합니다.
+// 정규화 원칙에 따라 CMA_Records 테이블은 카테고리의 고유 ID(category_id)를
+// 외래키로 저장하도록 구성합니다.
 // ==========================================================================
 void MainWindow::initDatabase()
 {
@@ -145,9 +112,10 @@ void MainWindow::initDatabase()
     QString createTable = "CREATE TABLE IF NOT EXISTS CMA_Records ("
                           "id INTEGER PRIMARY KEY AUTOINCREMENT, "
                           "date TEXT, "
-                          "category TEXT, "
+                          "category_id INTEGER, "
                           "amount INTEGER, "
-                          "memo TEXT)";
+                          "memo TEXT, "
+                          "FOREIGN KEY(category_id) REFERENCES Category(id))";
 
     if (!query.exec(createTable)) {
         qDebug() << "Table create error:" << query.lastError();
@@ -166,6 +134,7 @@ void MainWindow::initCategoryTable()
         return;
     }
 
+    // 초기 실행 시점에만 기본 카테고리 데이터를 구성합니다.
     query.exec("SELECT COUNT(*) FROM Category");
     if (query.next() && query.value(0).toInt() == 0) {
         QStringList defaultCategories = {"식비", "교통비", "문화생활", "생필품", "기타"};
@@ -178,13 +147,123 @@ void MainWindow::initCategoryTable()
 }
 
 // ==========================================================================
+// 메뉴바 동적 초기화
+// --------------------------------------------------------------------------
+// UI 디자이너에 생성된 기존 menubar 객체에 접근하여 '설정' 메뉴와
+// 카테고리 관리 액션을 코드로 직접 마운트합니다.
+// ==========================================================================
+void MainWindow::initMenuBar()
+{
+    QMenu *settingMenu = ui->menubar->addMenu("설정");
+    QAction *editCategoryAction = new QAction("카테고리 관리", this);
+
+    settingMenu->addAction(editCategoryAction);
+
+    connect(editCategoryAction, &QAction::triggered, this, &MainWindow::openCategoryManager);
+}
+
+// ==========================================================================
+// 동적 카테고리 관리 다이얼로그
+// --------------------------------------------------------------------------
+// 카테고리 테이블 전용 모델을 붙여 즉각적인 CRUD를 지원하며,
+// 다이얼로그 종료 시 메인 화면의 외래키 연동 데이터들을 일괄 갱신합니다.
+// ==========================================================================
+void MainWindow::openCategoryManager()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle("카테고리 관리");
+    dialog.resize(350, 400);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+
+    QSqlTableModel *catModel = new QSqlTableModel(&dialog, db);
+    catModel->setTable("Category");
+    catModel->setEditStrategy(QSqlTableModel::OnManualSubmit);
+    catModel->setHeaderData(0, Qt::Horizontal, "ID");
+    catModel->setHeaderData(1, Qt::Horizontal, "카테고리명");
+    catModel->select();
+
+    QTableView *tv = new QTableView(&dialog);
+    tv->setModel(catModel);
+    tv->hideColumn(0);
+    tv->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    tv->setSelectionBehavior(QAbstractItemView::SelectRows);
+    layout->addWidget(tv);
+
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    QPushButton *btnAdd = new QPushButton("행 추가", &dialog);
+    QPushButton *btnDel = new QPushButton("선택 삭제", &dialog);
+    QPushButton *btnSave = new QPushButton("저장 후 닫기", &dialog);
+
+    btnLayout->addWidget(btnAdd);
+    btnLayout->addWidget(btnDel);
+    btnLayout->addStretch();
+    btnLayout->addWidget(btnSave);
+    layout->addLayout(btnLayout);
+
+    connect(btnAdd, &QPushButton::clicked, [&]() {
+        int row = catModel->rowCount();
+        catModel->insertRow(row);
+        QModelIndex index = catModel->index(row, 1);
+        tv->setCurrentIndex(index);
+        tv->edit(index);
+    });
+
+    connect(btnDel, &QPushButton::clicked, [&]() {
+        QModelIndexList selected = tv->selectionModel()->selectedRows();
+        if (selected.isEmpty()) return;
+
+        // 1. 방어 로직: 선택된 카테고리가 가계부 내역(CMA_Records)에서 사용 중인지 검증
+        for (const QModelIndex &idx : selected) {
+            int catId = catModel->data(catModel->index(idx.row(), 0)).toInt();
+            QString catName = catModel->data(catModel->index(idx.row(), 1)).toString();
+
+            QSqlQuery checkQuery;
+            checkQuery.prepare("SELECT COUNT(*) FROM CMA_Records WHERE category_id = :id");
+            checkQuery.bindValue(":id", catId);
+            checkQuery.exec();
+
+            if (checkQuery.next() && checkQuery.value(0).toInt() > 0) {
+                QMessageBox::warning(&dialog, "삭제 불가",
+                                     QString("'%1' 카테고리를 사용하는 내역이 존재하여 삭제할 수 없습니다.\n"
+                                             "해당 내역을 먼저 다른 카테고리로 변경하거나 지워주세요.").arg(catName));
+                return; // 사용 중인 항목이 하나라도 발견되면 즉시 전체 삭제 프로세스 중단
+            }
+        }
+
+        // 2. 검증을 모두 통과했다면 정상적으로 삭제 수행 (역순 삭제)
+        for (int i = selected.count() - 1; i >= 0; --i) {
+            catModel->removeRow(selected.at(i).row());
+        }
+    });
+
+    connect(btnSave, &QPushButton::clicked, [&]() {
+        if (catModel->submitAll()) {
+            dialog.accept();
+        } else {
+            QMessageBox::warning(&dialog, "저장 실패", "카테고리명이 중복되거나 잘못되었습니다.");
+            catModel->revertAll();
+        }
+    });
+
+    dialog.exec();
+
+    // 카테고리 변경 사항을 메인 뷰의 모든 컴포넌트(콤보박스, 그리드, 대시보드)에 즉시 동기화
+    loadCategories();
+    if (tableModel) {
+        tableModel->select();
+    }
+    updateDashboard();
+}
+
+// ==========================================================================
 // 주요 이벤트 핸들러 초기화
 // --------------------------------------------------------------------------
 // 사용자의 클릭 동작이나 입력 변화에 대응하는 비즈니스 로직(CRUD)을 매핑합니다.
 // ==========================================================================
 void MainWindow::initEventHandlers()
 {
-    // 1. 화면 전환 라우팅 연결
+    // 화면 네비게이션 라우팅
     connect(ui->bt_BackToPage1, &QPushButton::clicked, this, [this]() { ui->stackedWidget->setCurrentIndex(0); });
     connect(ui->bt_BackToPage1_, &QPushButton::clicked, this, [this]() { ui->stackedWidget->setCurrentIndex(0); });
     connect(ui->bt_BackToPage2, &QPushButton::clicked, this, [this]() { ui->stackedWidget->setCurrentIndex(1); });
@@ -193,23 +272,22 @@ void MainWindow::initEventHandlers()
     connect(ui->bt_ToPage3, &QPushButton::clicked, this, [this]() { ui->stackedWidget->setCurrentIndex(2); });
     connect(ui->bt_ToPage4, &QPushButton::clicked, this, [this]() { ui->stackedWidget->setCurrentIndex(3); });
 
-    // 대시보드 페이지 진입 시, 백엔드 데이터 최신화
+    // 대시보드 진입 시 최신 상태 동기화 처리
     connect(ui->bt_ToPage5, &QPushButton::clicked, this, [this]() {
         updateDashboardMonthList();
         updateDashboard();
         ui->stackedWidget->setCurrentIndex(4);
     });
 
-    // 2. [입력/수정 탭] 기간(From-To) 설정 방어 로직 (핵심 요구사항)
-    // 시작일(From)이 변경될 때마다, 종료일(To)이 선택할 수 있는 가장 빠른 날짜를 제한합니다.
+    // 기간(From-To) 설정 방어 로직: 시작일보다 과거를 종료일로 설정할 수 없게 차단
     connect(ui->de_EditStart, &QDateEdit::dateChanged, this, [this](const QDate &date) {
         ui->de_EditEnd->setMinimumDate(date);
     });
 
-    // 3. 신규 가계부 내역 저장(INSERT) 로직
+    // 신규 내역 추가 (카테고리 ID 기반 외래키 삽입)
     connect(ui->bt_Add, &QPushButton::clicked, this, [this]() {
         QString date = ui->de_Add->date().toString("yyyy-MM-dd");
-        QString category = ui->cb_Add->currentText();
+        int categoryId = ui->cb_Add->currentData().toInt();
         QString memo = ui->le_AddMemo->text();
         int amount = ui->le_AddAmount->text().remove(",").toInt();
 
@@ -219,9 +297,9 @@ void MainWindow::initEventHandlers()
         }
 
         QSqlQuery query;
-        query.prepare("INSERT INTO CMA_Records (date, category, amount, memo) VALUES (:date, :category, :amount, :memo)");
+        query.prepare("INSERT INTO CMA_Records (date, category_id, amount, memo) VALUES (:date, :category_id, :amount, :memo)");
         query.bindValue(":date", date);
-        query.bindValue(":category", category);
+        query.bindValue(":category_id", categoryId);
         query.bindValue(":amount", amount);
         query.bindValue(":memo", memo);
 
@@ -237,22 +315,22 @@ void MainWindow::initEventHandlers()
         }
     });
 
-    // 4. 데이터 조회(SELECT) 및 필터링 로직
+    // 데이터 조회 및 필터링 (카테고리 ID 매칭)
     connect(ui->bt_SearchEdit, &QPushButton::clicked, this, [this]() {
         QString startDate = ui->de_EditStart->date().toString("yyyy-MM-dd");
         QString endDate = ui->de_EditEnd->date().toString("yyyy-MM-dd");
-        QString category = ui->cb_Edit->currentText();
+        int categoryId = ui->cb_Edit->currentData().toInt();
 
         QString filter = QString("date >= '%1' AND date <= '%2'").arg(startDate, endDate);
-        if (category != "전체") {
-            filter += QString(" AND category = '%1'").arg(category);
+        if (categoryId != 0) {
+            filter += QString(" AND category_id = %1").arg(categoryId);
         }
 
         tableModel->setFilter(filter);
         tableModel->select();
     });
 
-    // 5. 다중 선택 행 삭제(DELETE) 로직
+    // 다중 선택 행 삭제 로직
     connect(ui->bt_Delete, &QPushButton::clicked, this, [this]() {
         QModelIndexList selectedRows = ui->tv_Edit->selectionModel()->selectedRows();
         if (selectedRows.isEmpty()) {
@@ -274,7 +352,7 @@ void MainWindow::initEventHandlers()
         }
     });
 
-    // 6. 인라인 에디팅 내역 일괄 커밋(UPDATE) 로직
+    // 인라인 에디팅 내역 일괄 커밋
     connect(ui->bt_EditConfirm, &QPushButton::clicked, this, [this]() {
         if (tableModel->submitAll()) {
             QMessageBox::information(this, "성공", "수정된 내용이 안전하게 저장되었습니다.");
@@ -348,13 +426,16 @@ void MainWindow::initCurrencyComponent()
 // ==========================================================================
 // 메인 테이블 모델 세팅
 // --------------------------------------------------------------------------
-// 데이터 그리드 뷰(QTableView)와 SQL 모델을 연결하고,
-// 각 컬럼의 너비를 조정하여 화면 가독성을 최적화합니다.
+// 데이터 그리드 뷰와 관계형 SQL 모델을 연결하고, Category 테이블과의
+// 외래키 릴레이션을 매핑하여 화면에는 자동으로 이름을 보여주도록 구성합니다.
 // ==========================================================================
 void MainWindow::initTableModel()
 {
     tableModel = new CustomSqlTableModel(this, db);
     tableModel->setTable("CMA_Records");
+
+    // 2번 컬럼(category_id)을 Category 테이블의 id와 name으로 매핑 연결
+    static_cast<CustomSqlTableModel*>(tableModel)->setRelation(2, QSqlRelation("Category", "id", "name"));
     tableModel->setEditStrategy(QSqlTableModel::OnManualSubmit);
 
     tableModel->setHeaderData(0, Qt::Horizontal, "ID");
@@ -370,9 +451,10 @@ void MainWindow::initTableModel()
     ui->tv_Edit->setColumnWidth(1, 100);
     ui->tv_Edit->setColumnWidth(2, 90);
     ui->tv_Edit->setColumnWidth(3, 120);
-    ui->tv_Edit->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch); // 메모 열 가변 확장
+    ui->tv_Edit->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
 
-    ui->tv_Edit->setItemDelegateForColumn(2, new CategoryDelegate(this));
+    // QSqlRelationalDelegate를 통해 외래키 컬럼의 콤보박스를 자동 지원하도록 설정
+    ui->tv_Edit->setItemDelegate(new QSqlRelationalDelegate(ui->tv_Edit));
     ui->tv_Edit->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tv_Edit->setSelectionMode(QAbstractItemView::ExtendedSelection);
 
@@ -409,14 +491,13 @@ void MainWindow::initDashboard()
     cb_DashboardMonthStart->setMinimumSize(120, 30);
     cb_DashboardMonthEnd->setMinimumSize(120, 30);
 
-    // 대시보드 상단 레이아웃을 찾아 위젯들을 끼워 넣음
     if (QHBoxLayout *hLayout = ui->page_5->findChild<QHBoxLayout*>("horizontalLayout_9")) {
         hLayout->insertWidget(1, cb_DashboardMonthStart);
         hLayout->insertWidget(2, tildeLabel);
         hLayout->insertWidget(3, cb_DashboardMonthEnd);
     }
 
-    // [시작 월] 콤보박스 변경 이벤트 처리 (핵심 요구사항)
+    // [시작 월] 콤보박스 변경 이벤트 처리 (종료 월의 범위를 제한하여 역순 방어)
     connect(cb_DashboardMonthStart, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (index < 0) return;
 
@@ -427,18 +508,16 @@ void MainWindow::initDashboard()
             QString startMonth = cb_DashboardMonthStart->currentData().toString();
             QString currentEndMonth = cb_DashboardMonthEnd->currentData().toString();
 
-            // 사용자가 선택한 Start 기준보다 과거나 유효하지 않은 데이터를 End 콤보박스에서 제거하여 원천 차단
             cb_DashboardMonthEnd->blockSignals(true);
             cb_DashboardMonthEnd->clear();
 
             for (int i = 1; i < cb_DashboardMonthStart->count(); ++i) {
                 QString ym = cb_DashboardMonthStart->itemData(i).toString();
-                if (ym >= startMonth) { // Start 월과 같거나 이후인 데이터만 필터링
+                if (ym >= startMonth) {
                     cb_DashboardMonthEnd->addItem(cb_DashboardMonthStart->itemText(i), ym);
                 }
             }
 
-            // 기존 End 선택값이 여전히 유효하다면 복구, 불가능해졌다면 Start와 강제로 동일하게 맞춤
             int endIdx = cb_DashboardMonthEnd->findData(currentEndMonth);
             if (endIdx >= 0) {
                 cb_DashboardMonthEnd->setCurrentIndex(endIdx);
@@ -450,12 +529,10 @@ void MainWindow::initDashboard()
         updateDashboard();
     });
 
-    // [종료 월] 변경 이벤트 처리
     connect(cb_DashboardMonthEnd, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (index >= 0) updateDashboard();
     });
 
-    // 파이 차트 초기화 세팅
     dashboardSeries = new QPieSeries(this);
     dashboardSeries->setPieSize(0.85);
 
@@ -469,6 +546,8 @@ void MainWindow::initDashboard()
 
     QChartView *chartView = new QChartView(dashboardChart);
     chartView->setRenderHint(QPainter::Antialiasing);
+    chartView->setMinimumHeight(750);
+    chartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     if (QVBoxLayout *layout = qobject_cast<QVBoxLayout*>(ui->tab_Chart->layout())) {
         layout->addWidget(chartView);
@@ -482,7 +561,7 @@ void MainWindow::initDashboard()
 // ==========================================================================
 // 대시보드 데이터 동기화
 // --------------------------------------------------------------------------
-// 선택된 기간 필터(WHERE 절)를 반영하여 카테고리별 통계를 내고 표와 차트에 렌더링합니다.
+// 선택된 기간 필터를 반영하고 Category 테이블과 JOIN하여 통계를 렌더링합니다.
 // ==========================================================================
 void MainWindow::updateDashboard()
 {
@@ -494,16 +573,19 @@ void MainWindow::updateDashboard()
     QString whereClause = "";
 
     if (startMonth != "ALL" && !startMonth.isEmpty() && !endMonth.isEmpty()) {
-        // UI에서 방어 코드가 적용되어 있지만, 데이터 무결성을 위해 백엔드 레벨에서 한 번 더 Swap 검증(BETWEEN)
         QString minMonth = qMin(startMonth, endMonth);
         QString maxMonth = qMax(startMonth, endMonth);
-        whereClause = QString("WHERE substr(date, 1, 7) BETWEEN '%1' AND '%2'").arg(minMonth, maxMonth);
+        // 조인 쿼리를 위해 기준 테이블의 알리아스(r) 명시
+        whereClause = QString("WHERE substr(r.date, 1, 7) BETWEEN '%1' AND '%2'").arg(minMonth, maxMonth);
     }
 
     qulonglong totalAmount = 0;
     int row = 0;
 
-    QSqlQuery catQuery(QString("SELECT category, SUM(amount) FROM CMA_Records %1 GROUP BY category ORDER BY SUM(amount) DESC").arg(whereClause));
+    // 카테고리 ID가 아닌 JOIN을 통해 실제 Category 테이블의 이름을 추출하여 집계
+    QSqlQuery catQuery(QString("SELECT c.name, SUM(r.amount) FROM CMA_Records r "
+                               "JOIN Category c ON r.category_id = c.id "
+                               "%1 GROUP BY r.category_id ORDER BY SUM(r.amount) DESC").arg(whereClause));
 
     while (catQuery.next()) {
         QString cat = catQuery.value(0).toString();
@@ -529,12 +611,11 @@ void MainWindow::updateDashboard()
 
     ui->label->setText(QString("총 누적 금액: %1 원").arg(QLocale().toString(totalAmount)));
 
-    // 비율이 작은 항목(3% 미만)의 라벨 숨김 처리를 통해 텍스트 겹침 오류를 우회하는 스마트 라벨링 로직
     for (QPieSlice *slice : dashboardSeries->slices()) {
         QString labelText = QString("%1 (%2%)")
         .arg(slice->label())
             .arg(QString::number(slice->percentage() * 100, 'f', 1));
-        slice->setLabel(labelText); // 범례(Legend) 출력을 위해 텍스트는 할당
+        slice->setLabel(labelText);
 
         if (slice->percentage() >= 0.03) {
             slice->setLabelVisible(true);
@@ -553,7 +634,6 @@ void MainWindow::updateDashboard()
 // ==========================================================================
 void MainWindow::updateDashboardMonthList()
 {
-    // 리스트를 초기화하는 동안 이벤트가 무한 반복되어 꼬이는 것을 방지
     cb_DashboardMonthStart->blockSignals(true);
     cb_DashboardMonthEnd->blockSignals(true);
 
@@ -567,10 +647,11 @@ void MainWindow::updateDashboardMonthList()
     while (query.next()) {
         QString ym = query.value(0).toString();
         QString displayText = QString("%1년 %2월").arg(ym.mid(0, 4)).arg(ym.mid(5, 2));
+
         cb_DashboardMonthStart->addItem(displayText, ym);
+        cb_DashboardMonthEnd->addItem(displayText, ym);
     }
 
-    // 기본 '전체 기간'에 맞추어 종료 월 콤보박스는 비활성화 초기화
     cb_DashboardMonthEnd->setEnabled(false);
 
     cb_DashboardMonthStart->blockSignals(false);
